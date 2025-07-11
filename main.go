@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"image"
 	"image/color"
@@ -13,11 +14,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/agnivade/levenshtein"
 )
 
-// --- 画像処理ヘルパー関数 ---
+// --- 定数定義 ---
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+)
 
-// convertToGrayscaleは、画像をグレースケールに変換する
+// --- 新しいデータ構造 ---
+type OcrResult struct {
+	Original  string
+	Corrected string
+}
+
+// --- 画像処理ヘルパー関数 (変更なし) ---
 func convertToGrayscale(img image.Image) *image.Gray {
 	bounds := img.Bounds()
 	grayImg := image.NewGray(bounds)
@@ -29,7 +45,6 @@ func convertToGrayscale(img image.Image) *image.Gray {
 	return grayImg
 }
 
-// convertToBinaryAndInvertは、グレースケール画像を二値化し、ネガポジ反転させる
 func convertToBinaryAndInvert(grayImg *image.Gray, threshold uint8) *image.Gray {
 	bounds := grayImg.Bounds()
 	binaryImg := image.NewGray(bounds)
@@ -45,16 +60,51 @@ func convertToBinaryAndInvert(grayImg *image.Gray, threshold uint8) *image.Gray 
 	return binaryImg
 }
 
-// --- 主要な処理関数 ---
+// --- ヘルパー関数 (変更なし) ---
+func findClosestMatch(text string, candidates []string) string {
+	if len(candidates) == 0 {
+		return text
+	}
+	minDistance := -1
+	bestMatch := candidates[0]
+	for _, candidate := range candidates {
+		distance := levenshtein.ComputeDistance(text, candidate)
+		if minDistance == -1 || distance < minDistance {
+			minDistance = distance
+			bestMatch = candidate
+		}
+	}
+	return bestMatch
+}
 
-// openImageは画像ファイルパスからimage.Imageオブジェクトを生成する
+func loadTsv(filePath string) ([]string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("TSVファイルを開けませんでした %s: %w", filePath, err)
+	}
+	defer file.Close()
+	reader := csv.NewReader(file)
+	reader.Comma = '\t'
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("TSVファイルの読み込みに失敗しました %s: %w", filePath, err)
+	}
+	var candidates []string
+	for _, record := range records {
+		if len(record) > 0 {
+			candidates = append(candidates, record[0])
+		}
+	}
+	return candidates, nil
+}
+
+// --- 主要な処理関数 (変更なし) ---
 func openImage(filePath string) (image.Image, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("ファイルを開けませんでした: %w", err)
 	}
 	defer file.Close()
-
 	img, _, err := image.Decode(file)
 	if err != nil {
 		return nil, fmt.Errorf("画像をデコードできませんでした: %w", err)
@@ -62,17 +112,15 @@ func openImage(filePath string) (image.Image, error) {
 	return img, nil
 }
 
-// calculateCropRectsは、画像の幅と高さから切り抜き領域のリストを返す
 func calculateCropRects(width, height float64) []image.Rectangle {
 	cropRatios := []struct {
 		x0, y0, x1, y1 float64
 	}{
-		{0.336, 0.523, 0.724, 0.565}, // 1. (645,565,1390,610)
-		{0.358, 0.569, 0.724, 0.625}, // 2. (688,615,1390,675)
-		{0.358, 0.625, 0.724, 0.685}, // 3. (688,675,1390,740)
-		{0.358, 0.685, 0.724, 0.745}, // 4. (688,740,1390,805)
+		{0.336, 0.523, 0.724, 0.565},
+		{0.358, 0.569, 0.724, 0.625},
+		{0.358, 0.625, 0.724, 0.685},
+		{0.358, 0.685, 0.724, 0.745},
 	}
-
 	rects := make([]image.Rectangle, len(cropRatios))
 	for i, r := range cropRatios {
 		rects[i] = image.Rect(
@@ -85,7 +133,6 @@ func calculateCropRects(width, height float64) []image.Rectangle {
 	return rects
 }
 
-// preprocessRegionは、元画像から指定領域を切り抜き、前処理（グレースケール化、二値化）を行う
 func preprocessRegion(img image.Image, rect image.Rectangle) *image.Gray {
 	type subImager interface {
 		SubImage(r image.Rectangle) image.Image
@@ -96,34 +143,26 @@ func preprocessRegion(img image.Image, rect image.Rectangle) *image.Gray {
 	return convertToBinaryAndInvert(grayImg, threshold)
 }
 
-// performOCRは、二値化された画像データでTesseractを実行し、認識結果の文字列を返す
 func performOCR(binaryImg image.Image) (string, error) {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, binaryImg); err != nil {
 		return "", fmt.Errorf("OCR用画像のエンコードに失敗しました: %w", err)
 	}
-
 	cmd := exec.Command("./Tesseract-OCR/tesseract.exe", "stdin", "stdout", "-l", "jpn")
 	cmd.Stdin = &buf
-
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tesseractの実行に失敗しました: %v, 出力: %s", err, string(output))
 	}
-
-	re := regexp.MustCompile(`Estimating resolution as \d+`)
+	re := regexp.MustCompile(`Estimating resolution as \d+|※適用可能な武器種のみ`)
 	cleanedOutput := re.ReplaceAllString(string(output), "")
-
-	parts := strings.Fields(string(cleanedOutput))
+	parts := strings.Fields(cleanedOutput)
 	cleanedText := strings.Join(parts, "")
-
 	return cleanedText, nil
 }
 
-// --- 処理の統括とエントリーポイント ---
-
-// processImageFileは、単一の画像ファイルに対する一連の処理を統括する
-func processImageFile(filePath, tempDir string) {
+// --- 処理の統括とエントリーポイント (ロジック変更あり) ---
+func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsCandidates []string) {
 	fmt.Printf("\n--- 処理開始: %s ---\n", filepath.Base(filePath))
 
 	img, err := openImage(filePath)
@@ -135,11 +174,13 @@ func processImageFile(filePath, tempDir string) {
 	bounds := img.Bounds()
 	cropRects := calculateCropRects(float64(bounds.Dx()), float64(bounds.Dy()))
 
+	// OCR結果（補正前・後）を保持するスライス
+	results := make([]OcrResult, len(cropRects))
+
 	for i, rect := range cropRects {
-		// 画像の前処理
 		binaryImg := preprocessRegion(img, rect)
 
-		// デバッグ用に一時ファイルを保存
+		// (一時ファイルの保存は変更なし)
 		baseName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
 		tempPath := filepath.Join(tempDir, fmt.Sprintf("%s_crop_%d.png", baseName, i+1))
 		if outFile, err := os.Create(tempPath); err == nil {
@@ -147,20 +188,69 @@ func processImageFile(filePath, tempDir string) {
 			outFile.Close()
 		}
 
-		// OCRを実行
-		text, err := performOCR(binaryImg)
+		ocrText, err := performOCR(binaryImg)
 		if err != nil {
 			log.Printf("エラー: 領域 %d のOCRに失敗しました: %v", i+1, err)
+			results[i] = OcrResult{Original: "OCR失敗", Corrected: "N/A"}
 			continue
 		}
 
-		// 結果を表示
-		fmt.Printf("[領域 %d OCR結果]: %s\n", i+1, text)
+		// 補正前と補正後の両方を保持
+		results[i].Original = ocrText
+		if i == 0 {
+			results[i].Corrected = findClosestMatch(ocrText, region1Candidates)
+		} else {
+			results[i].Corrected = findClosestMatch(ocrText, otherRegionsCandidates)
+		}
+	}
+
+	// 領域1の補正後テキストに基づいて色と絵文字を決定
+	var colorCode, emoji string
+	switch results[0].Corrected {
+	case "壮大な燃える景色":
+		colorCode, emoji = colorRed, "🔥"
+	case "壮大な滴る景色":
+		colorCode, emoji = colorBlue, "💧"
+	case "壮大な輝く景色":
+		colorCode, emoji = colorYellow, "✨"
+	case "壮大な静まる景色":
+		colorCode, emoji = colorGreen, "🍃"
+	default:
+		colorCode, emoji = colorReset, "❔"
+	}
+
+	// 全ての結果を新しいフォーマットで表示
+	for i, res := range results {
+		// 補正前と後が同じ場合は矢印を表示しない
+		if res.Original == res.Corrected {
+			if i == 0 {
+				fmt.Printf("[領域 %d OCR結果]: %s %s%s%s\n", i+1, emoji, colorCode, res.Corrected, colorReset)
+			} else {
+				fmt.Printf("[領域 %d OCR結果]: %s%s%s\n", i+1, colorCode, res.Corrected, colorReset)
+			}
+		} else {
+			if i == 0 {
+				fmt.Printf("[領域 %d OCR結果]: %s %s%s%s ← %s\n", i+1, emoji, colorCode, res.Corrected, colorReset, res.Original)
+			} else {
+				fmt.Printf("[領域 %d OCR結果]: %s%s%s ← %s\n", i+1, colorCode, res.Corrected, colorReset, res.Original)
+			}
+		}
 	}
 }
 
-// mainは、プログラムのエントリーポイント
+// main関数 (変更なし)
 func main() {
+	region1Candidates := []string{
+		"壮大な燃える景色",
+		"壮大な滴る景色",
+		"壮大な輝く景色",
+		"壮大な静まる景色",
+	}
+	otherRegionsCandidates, err := loadTsv("relics.tsv")
+	if err != nil {
+		log.Printf("警告: relics.tsvの読み込みに失敗しました。領域2-4の補正は行われません。エラー: %v", err)
+	}
+
 	dataDir := "./data"
 	tempDir := "./temp"
 
@@ -180,7 +270,7 @@ func main() {
 		fileName := file.Name()
 		ext := strings.ToLower(filepath.Ext(fileName))
 		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
-			processImageFile(filepath.Join(dataDir, fileName), tempDir)
+			processImageFile(filepath.Join(dataDir, fileName), tempDir, region1Candidates, otherRegionsCandidates)
 		}
 	}
 
