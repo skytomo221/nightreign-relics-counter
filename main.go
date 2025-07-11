@@ -14,11 +14,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/agnivade/levenshtein"
 )
 
-// --- 定数定義 ---
 const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"
@@ -27,13 +27,11 @@ const (
 	colorBlue   = "\033[34m"
 )
 
-// --- 新しいデータ構造 ---
 type OcrResult struct {
 	Original  string
 	Corrected string
 }
 
-// --- 画像処理ヘルパー関数 (変更なし) ---
 func convertToGrayscale(img image.Image) *image.Gray {
 	bounds := img.Bounds()
 	grayImg := image.NewGray(bounds)
@@ -60,7 +58,6 @@ func convertToBinaryAndInvert(grayImg *image.Gray, threshold uint8) *image.Gray 
 	return binaryImg
 }
 
-// --- ヘルパー関数 (変更なし) ---
 func findClosestMatch(text string, candidates []string) string {
 	if len(candidates) == 0 {
 		return text
@@ -98,7 +95,6 @@ func loadTsv(filePath string) ([]string, error) {
 	return candidates, nil
 }
 
-// --- 主要な処理関数 (変更なし) ---
 func openImage(filePath string) (image.Image, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -161,26 +157,20 @@ func performOCR(binaryImg image.Image) (string, error) {
 	return cleanedText, nil
 }
 
-// --- 処理の統括とエントリーポイント (ロジック変更あり) ---
-func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsCandidates []string) {
+func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsCandidates []string) ([][]string, error) {
 	fmt.Printf("\n--- 処理開始: %s ---\n", filepath.Base(filePath))
 
 	img, err := openImage(filePath)
 	if err != nil {
-		log.Printf("エラー: %v", err)
-		return
+		return nil, err
 	}
 
 	bounds := img.Bounds()
 	cropRects := calculateCropRects(float64(bounds.Dx()), float64(bounds.Dy()))
-
-	// OCR結果（補正前・後）を保持するスライス
 	results := make([]OcrResult, len(cropRects))
 
 	for i, rect := range cropRects {
 		binaryImg := preprocessRegion(img, rect)
-
-		// (一時ファイルの保存は変更なし)
 		baseName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
 		tempPath := filepath.Join(tempDir, fmt.Sprintf("%s_crop_%d.png", baseName, i+1))
 		if outFile, err := os.Create(tempPath); err == nil {
@@ -194,8 +184,6 @@ func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsC
 			results[i] = OcrResult{Original: "OCR失敗", Corrected: "N/A"}
 			continue
 		}
-
-		// 補正前と補正後の両方を保持
 		results[i].Original = ocrText
 		if i == 0 {
 			results[i].Corrected = findClosestMatch(ocrText, region1Candidates)
@@ -204,7 +192,6 @@ func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsC
 		}
 	}
 
-	// 領域1の補正後テキストに基づいて色と絵文字を決定
 	var colorCode, emoji string
 	switch results[0].Corrected {
 	case "壮大な燃える景色":
@@ -219,7 +206,6 @@ func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsC
 		colorCode, emoji = colorReset, "❔"
 	}
 
-	// 全ての結果を新しいフォーマットで表示
 	for i, res := range results {
 		// 補正前と後が同じ場合は矢印を表示しない
 		if res.Original == res.Corrected {
@@ -236,24 +222,54 @@ func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsC
 			}
 		}
 	}
+
+	var outputRows [][]string
+	scanTime := time.Now().Format("2006-01-02 15:04:05")
+	imageName := filepath.Base(filePath)
+	region1Result := results[0].Corrected
+
+	// 領域2, 3, 4の結果をそれぞれ行として追加
+	for i := 1; i < 4; i++ {
+		row := []string{
+			scanTime,
+			imageName,
+			region1Result,
+			results[i].Corrected, // 領域2,3,4の補正後テキスト
+			results[i].Original,  // 領域2,3,4の補正前テキスト
+		}
+		outputRows = append(outputRows, row)
+	}
+	fmt.Printf("--- 処理完了: %s ---\n", filepath.Base(filePath))
+	return outputRows, nil
 }
 
-// main関数 (変更なし)
+// main関数は、TSVファイルへの書き込みを担う
 func main() {
 	region1Candidates := []string{
-		"壮大な燃える景色",
-		"壮大な滴る景色",
-		"壮大な輝く景色",
-		"壮大な静まる景色",
+		"壮大な燃える景色", "壮大な滴る景色", "壮大な輝く景色", "壮大な静まる景色",
 	}
 	otherRegionsCandidates, err := loadTsv("relics.tsv")
 	if err != nil {
 		log.Printf("警告: relics.tsvの読み込みに失敗しました。領域2-4の補正は行われません。エラー: %v", err)
 	}
 
+	outputFileName := "results.tsv"
+	if _, err := os.Stat(outputFileName); err != nil {
+		log.Printf("警告: 出力ファイルの存在確認に失敗しました: %v", err)
+	}
+
+	file, err := os.OpenFile(outputFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("出力ファイルを開けませんでした: %v", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	writer.Comma = '\t'
+	defer writer.Flush() // プログラム終了時にバッファを書き込む
+
 	dataDir := "./data"
 	tempDir := "./temp"
-
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		log.Fatalf("エラー: 一時ディレクトリの作成に失敗しました: %v", err)
 	}
@@ -263,16 +279,22 @@ func main() {
 		log.Fatalf("エラー: dataディレクトリの読み込みに失敗しました: %v", err)
 	}
 
-	for _, file := range files {
-		if file.IsDir() {
+	for _, fileEntry := range files {
+		if fileEntry.IsDir() {
 			continue
 		}
-		fileName := file.Name()
+		fileName := fileEntry.Name()
 		ext := strings.ToLower(filepath.Ext(fileName))
 		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
-			processImageFile(filepath.Join(dataDir, fileName), tempDir, region1Candidates, otherRegionsCandidates)
+			rows, err := processImageFile(filepath.Join(dataDir, fileName), tempDir, region1Candidates, otherRegionsCandidates)
+			if err != nil {
+				log.Printf("エラー: %sの処理中にエラーが発生しました: %v", fileName, err)
+				continue
+			}
+			if err := writer.WriteAll(rows); err != nil {
+				log.Printf("エラー: %sの結果をTSVに書き込めませんでした: %v", fileName, err)
+			}
 		}
 	}
-
 	fmt.Println("\n--- 全ての処理が完了しました ---")
 }
