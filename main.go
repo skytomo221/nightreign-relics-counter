@@ -1,69 +1,188 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/jpeg"
+	"image/png"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
-
-	"github.com/otiai10/gosseract/v2"
+	"regexp"
+	"strings"
 )
 
+// --- 画像処理ヘルパー関数 ---
+
+// convertToGrayscaleは、画像をグレースケールに変換する
+func convertToGrayscale(img image.Image) *image.Gray {
+	bounds := img.Bounds()
+	grayImg := image.NewGray(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			grayImg.Set(x, y, color.GrayModel.Convert(img.At(x, y)))
+		}
+	}
+	return grayImg
+}
+
+// convertToBinaryAndInvertは、グレースケール画像を二値化し、ネガポジ反転させる
+func convertToBinaryAndInvert(grayImg *image.Gray, threshold uint8) *image.Gray {
+	bounds := grayImg.Bounds()
+	binaryImg := image.NewGray(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			if grayImg.GrayAt(x, y).Y > threshold {
+				binaryImg.SetGray(x, y, color.Gray{Y: 0})
+			} else {
+				binaryImg.SetGray(x, y, color.Gray{Y: 255})
+			}
+		}
+	}
+	return binaryImg
+}
+
+// --- 主要な処理関数 ---
+
+// openImageは画像ファイルパスからimage.Imageオブジェクトを生成する
+func openImage(filePath string) (image.Image, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("ファイルを開けませんでした: %w", err)
+	}
+	defer file.Close()
+
+	img, _, err := image.Decode(file)
+	if err != nil {
+		return nil, fmt.Errorf("画像をデコードできませんでした: %w", err)
+	}
+	return img, nil
+}
+
+// calculateCropRectsは、画像の幅と高さから切り抜き領域のリストを返す
+func calculateCropRects(width, height float64) []image.Rectangle {
+	cropRatios := []struct {
+		x0, y0, x1, y1 float64
+	}{
+		{0.336, 0.523, 0.724, 0.565}, // 1. (645,565,1390,610)
+		{0.358, 0.569, 0.724, 0.625}, // 2. (688,615,1390,675)
+		{0.358, 0.625, 0.724, 0.685}, // 3. (688,675,1390,740)
+		{0.358, 0.685, 0.724, 0.745}, // 4. (688,740,1390,805)
+	}
+
+	rects := make([]image.Rectangle, len(cropRatios))
+	for i, r := range cropRatios {
+		rects[i] = image.Rect(
+			int(width*r.x0),
+			int(height*r.y0),
+			int(width*r.x1),
+			int(height*r.y1),
+		)
+	}
+	return rects
+}
+
+// preprocessRegionは、元画像から指定領域を切り抜き、前処理（グレースケール化、二値化）を行う
+func preprocessRegion(img image.Image, rect image.Rectangle) *image.Gray {
+	type subImager interface {
+		SubImage(r image.Rectangle) image.Image
+	}
+	croppedImg := img.(subImager).SubImage(rect)
+	grayImg := convertToGrayscale(croppedImg)
+	threshold := uint8(64)
+	return convertToBinaryAndInvert(grayImg, threshold)
+}
+
+// performOCRは、二値化された画像データでTesseractを実行し、認識結果の文字列を返す
+func performOCR(binaryImg image.Image) (string, error) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, binaryImg); err != nil {
+		return "", fmt.Errorf("OCR用画像のエンコードに失敗しました: %w", err)
+	}
+
+	cmd := exec.Command("./Tesseract-OCR/tesseract.exe", "stdin", "stdout", "-l", "jpn")
+	cmd.Stdin = &buf
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("tesseractの実行に失敗しました: %v, 出力: %s", err, string(output))
+	}
+
+	re := regexp.MustCompile(`Estimating resolution as \d+`)
+	cleanedOutput := re.ReplaceAllString(string(output), "")
+
+	parts := strings.Fields(string(cleanedOutput))
+	cleanedText := strings.Join(parts, "")
+
+	return cleanedText, nil
+}
+
+// --- 処理の統括とエントリーポイント ---
+
+// processImageFileは、単一の画像ファイルに対する一連の処理を統括する
+func processImageFile(filePath, tempDir string) {
+	fmt.Printf("\n--- 処理開始: %s ---\n", filepath.Base(filePath))
+
+	img, err := openImage(filePath)
+	if err != nil {
+		log.Printf("エラー: %v", err)
+		return
+	}
+
+	bounds := img.Bounds()
+	cropRects := calculateCropRects(float64(bounds.Dx()), float64(bounds.Dy()))
+
+	for i, rect := range cropRects {
+		// 画像の前処理
+		binaryImg := preprocessRegion(img, rect)
+
+		// デバッグ用に一時ファイルを保存
+		baseName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+		tempPath := filepath.Join(tempDir, fmt.Sprintf("%s_crop_%d.png", baseName, i+1))
+		if outFile, err := os.Create(tempPath); err == nil {
+			png.Encode(outFile, binaryImg)
+			outFile.Close()
+		}
+
+		// OCRを実行
+		text, err := performOCR(binaryImg)
+		if err != nil {
+			log.Printf("エラー: 領域 %d のOCRに失敗しました: %v", i+1, err)
+			continue
+		}
+
+		// 結果を表示
+		fmt.Printf("[領域 %d OCR結果]: %s\n", i+1, text)
+	}
+}
+
+// mainは、プログラムのエントリーポイント
 func main() {
-	// 実行ファイルのディレクトリパスを取得
-	// これにより、アプリケーションと同じ階層にあるtessdataフォルダを参照できるようになる
-	ex, err := os.Executable()
+	dataDir := "./data"
+	tempDir := "./temp"
+
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		log.Fatalf("エラー: 一時ディレクトリの作成に失敗しました: %v", err)
+	}
+
+	files, err := os.ReadDir(dataDir)
 	if err != nil {
-		fmt.Printf("実行ファイルのパス取得エラー: %v\n", err)
-		return
-	}
-	exPath := filepath.Dir(ex)
-
-	// tessdataフォルダのパスを環境変数に設定
-	// これにより、gosseractがtessdataの場所を認識できるようになる
-	tessdataPath := filepath.Join(exPath, "tessdata")
-	if err := os.Setenv("TESSDATA_PREFIX", tessdataPath); err != nil {
-		fmt.Printf("環境変数の設定エラー: %v\n", err)
-		return
-	}
-	fmt.Printf("tessdataディレクトリのパスを設定: %s\n", tessdataPath)
-
-	// gosseractクライアントの作成
-	client := gosseract.NewClient()
-	// deferで必ずクライアントをクローズし、リソースを解放する
-	defer client.Close()
-
-	// ここにOCRしたい画像のパスを設定してね
-	// 例: アプリケーションと同じ階層に "image.png" がある場合
-	imagePath := filepath.Join(exPath, "image.png")
-	// あるいは、絶対パスを指定することもできる
-	// imagePath := "C:\\path\\to\\your\\image.png"
-
-	// 画像ファイルの存在確認
-	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
-		fmt.Printf("エラー: 画像ファイルが見つかりません: %s\n", imagePath)
-		fmt.Println("OCRしたい画像ファイルを指定されたパスに置いてください。")
-		return
+		log.Fatalf("エラー: dataディレクトリの読み込みに失敗しました: %v", err)
 	}
 
-	// OCR対象の画像を設定
-	if err := client.SetImage(imagePath); err != nil {
-		fmt.Printf("画像設定エラー: %v\n", err)
-		return
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+		fileName := file.Name()
+		ext := strings.ToLower(filepath.Ext(fileName))
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
+			processImageFile(filepath.Join(dataDir, fileName), tempDir)
+		}
 	}
 
-	// 必要に応じて認識したい言語を設定
-	// 日本語を認識させたい場合は "jpn" を追加。複数の言語を指定することも可能 ("eng+jpn")
-	// インストールした言語データ (.traineddata) がtessdataフォルダにあることを確認してね
-	client.SetLanguage("jpn", "eng") // 例: 日本語と英語を認識
-
-	// OCRを実行し、テキストを取得
-	text, err := client.Text()
-	if err != nil {
-		fmt.Printf("OCR実行エラー: %v\n", err)
-		return
-	}
-
-	fmt.Println("\n--- 認識されたテキスト ---")
-	fmt.Println(text)
-	fmt.Println("-------------------------")
+	fmt.Println("\n--- 全ての処理が完了しました ---")
 }

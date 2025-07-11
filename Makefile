@@ -9,11 +9,7 @@ DIST_DIR := dist
 APP_LANG_DATA_DIR := .\tessdata
 
 build: clean_exe
-	docker build -t go-ocr-builder .
-	docker create --name temp_container go-ocr-builder
-	docker cp temp_container:/myapp.exe .\%(APP_NAME).exe
-	docker rm temp_container
-	docker rmi go-ocr-builder
+	go build -o "$(APP_NAME).exe" -ldflags="-s -w" "$(MAIN_FILE)"
 
 run:
 	go run $(MAIN_FILE)
