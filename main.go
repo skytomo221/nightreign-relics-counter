@@ -9,6 +9,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,16 +66,63 @@ func findClosestMatch(text string, candidates []string) string {
 	if len(candidates) == 0 {
 		return text
 	}
+
 	minDistance := -1
-	bestMatch := candidates[0]
+	var bestMatches []string
+
 	for _, candidate := range candidates {
 		distance := levenshtein.ComputeDistance(text, candidate)
+
 		if minDistance == -1 || distance < minDistance {
 			minDistance = distance
-			bestMatch = candidate
+			bestMatches = []string{candidate}
+		} else if distance == minDistance {
+			bestMatches = append(bestMatches, candidate)
 		}
 	}
-	return bestMatch
+
+	if len(bestMatches) <= 1 {
+		if len(bestMatches) == 1 {
+			return bestMatches[0]
+		}
+		return text
+	}
+
+	var bestCandidate string
+	minCodeDiff := -1
+	runesText := []rune(text)
+
+	for _, candidate := range bestMatches {
+		runesCand := []rune(candidate)
+		currentCodeDiff := 0
+
+		if len(runesText) != len(runesCand) {
+			currentCodeDiff += 100000 * int(math.Abs(float64(len(runesText)-len(runesCand))))
+		}
+
+		limit := len(runesText)
+		if len(runesCand) < limit {
+			limit = len(runesCand)
+		}
+
+		for i := 0; i < limit; i++ {
+			if runesText[i] != runesCand[i] {
+				diff := int(runesText[i]) - int(runesCand[i])
+				currentCodeDiff += int(math.Abs(float64(diff)))
+			}
+		}
+
+		if minCodeDiff == -1 || currentCodeDiff < minCodeDiff {
+			minCodeDiff = currentCodeDiff
+			bestCandidate = candidate
+		}
+	}
+
+	if bestCandidate == "" {
+		return bestMatches[0]
+	}
+
+	return bestCandidate
 }
 
 func loadTsv(filePath string) ([]string, error) {
