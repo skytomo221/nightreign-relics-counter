@@ -13,7 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agnivade/levenshtein"
@@ -288,6 +290,13 @@ func main() {
 		log.Fatalf("エラー: dataディレクトリの読み込みに失敗しました: %v", err)
 	}
 
+	maxConcurrent := max(runtime.NumCPU(), 2)
+	fmt.Printf("--- 並列実行数: %d ---\n", maxConcurrent)
+
+	var wg sync.WaitGroup
+	var mtx sync.Mutex
+	semaphore := make(chan struct{}, maxConcurrent)
+
 	for _, fileEntry := range files {
 		if fileEntry.IsDir() {
 			continue
@@ -295,15 +304,34 @@ func main() {
 		fileName := fileEntry.Name()
 		ext := strings.ToLower(filepath.Ext(fileName))
 		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
-			rows, err := processImageFile(filepath.Join(dataDir, fileName), tempDir, region1Candidates, otherRegionsCandidates)
-			if err != nil {
-				log.Printf("エラー: %sの処理中にエラーが発生しました: %v", fileName, err)
-				continue
-			}
-			if err := writer.WriteAll(rows); err != nil {
-				log.Printf("エラー: %sの結果をTSVに書き込めませんでした: %v", fileName, err)
-			}
+			wg.Add(1)
+
+			semaphore <- struct{}{}
+
+			go func(entry os.DirEntry) {
+				defer func() {
+					<-semaphore
+					wg.Done()
+				}()
+
+				filePath := filepath.Join(dataDir, entry.Name())
+				rows, err := processImageFile(filePath, tempDir, region1Candidates, otherRegionsCandidates)
+				if err != nil {
+					log.Printf("エラー: %sの処理中にエラーが発生しました: %v", entry.Name(), err)
+					return
+				}
+
+				mtx.Lock()
+				if err := writer.WriteAll(rows); err != nil {
+					log.Printf("エラー: %sの結果をTSVに書き込めませんでした: %v", entry.Name(), err)
+				}
+				mtx.Unlock()
+
+			}(fileEntry)
 		}
 	}
+
+	wg.Wait()
+
 	fmt.Println("\n--- 全ての処理が完了しました ---")
 }
