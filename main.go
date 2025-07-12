@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/agnivade/levenshtein"
+	"github.com/nfnt/resize"
 )
 
 const (
@@ -129,12 +130,20 @@ func calculateCropRects(width, height float64) []image.Rectangle {
 	return rects
 }
 
-func preprocessRegion(img image.Image, rect image.Rectangle) *image.Gray {
+func preprocessRegion(img image.Image, rect image.Rectangle, regionIndex int) *image.Gray {
 	type subImager interface {
 		SubImage(r image.Rectangle) image.Image
 	}
 	croppedImg := img.(subImager).SubImage(rect)
-	grayImg := convertToGrayscale(croppedImg)
+
+	var processedImg image.Image = croppedImg
+
+	// 領域2~4 (index 1, 2, 3) の場合のみ画像を2倍に拡大する
+	if regionIndex > 0 {
+		processedImg = resize.Resize(uint(croppedImg.Bounds().Dx()*2), 0, croppedImg, resize.Lanczos3)
+	}
+
+	grayImg := convertToGrayscale(processedImg)
 	threshold := uint8(64)
 	return convertToBinaryAndInvert(grayImg, threshold)
 }
@@ -170,7 +179,7 @@ func processImageFile(filePath, tempDir string, region1Candidates, otherRegionsC
 	results := make([]OcrResult, len(cropRects))
 
 	for i, rect := range cropRects {
-		binaryImg := preprocessRegion(img, rect)
+		binaryImg := preprocessRegion(img, rect, i)
 		baseName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
 		tempPath := filepath.Join(tempDir, fmt.Sprintf("%s_crop_%d.png", baseName, i+1))
 		if outFile, err := os.Create(tempPath); err == nil {
