@@ -1,5 +1,8 @@
 .PHONY: build run test clean package clean_exe clean_dist
 
+SHELL := cmd.exe
+.SHELLFLAGS := /C
+
 APP_NAME := nightreign-relics-counter
 
 MAIN_FILE := .\main.go
