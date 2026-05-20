@@ -46,6 +46,8 @@ go.work
 # End of https://www.toptal.com/developers/gitignore/api/go,visualstudiocode
 
 data
+dist/
+*.zip
 results.tsv
 temp
 Tesseract-OCR

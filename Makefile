@@ -1,4 +1,4 @@
-.PHONY: build run test clean package clean_dist
+.PHONY: build run test clean package clean_exe clean_dist
 
 APP_NAME := nightreign-relics-counter
 
@@ -6,7 +6,7 @@ MAIN_FILE := .\main.go
 
 DIST_DIR := dist
 
-APP_LANG_DATA_DIR := .\tessdata
+TESSERACT_DIR ?= .\Tesseract-OCR
 
 build: clean_exe
 	go build -o "$(APP_NAME).exe" -ldflags="-s -w" "$(MAIN_FILE)"
@@ -19,10 +19,12 @@ test:
 
 package: clean_dist build
 	if not exist "$(DIST_DIR)" mkdir "$(DIST_DIR)"
-	if not exist "$(DIST_DIR)\tessdata" mkdir "$(DIST_DIR)\tessdata"
+	if not exist "$(DIST_DIR)\data" mkdir "$(DIST_DIR)\data"
+	if not exist "$(DIST_DIR)\Tesseract-OCR" mkdir "$(DIST_DIR)\Tesseract-OCR"
 	copy "$(APP_NAME).exe" "$(DIST_DIR)\"
-	xcopy "C:\Program Files\Tesseract-OCR\bin\*.dll" "$(DIST_DIR)\" /Y >NUL
-	xcopy "$(APP_LANG_DATA_DIR)" "$(DIST_DIR)\tessdata\" /E /I /Y >NUL
+	copy "README.md" "$(DIST_DIR)\"
+	copy "relics.tsv" "$(DIST_DIR)\"
+	xcopy "$(TESSERACT_DIR)" "$(DIST_DIR)\Tesseract-OCR\" /E /I /Y >NUL
 	if exist "LICENSE.txt" copy "LICENSE.txt" "$(DIST_DIR)\LICENSE.txt"
 
 clean_exe:

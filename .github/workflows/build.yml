@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          choco install make tesseract -y --no-progress
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -notin @(0, 3010)) {
+            exit $exitCode
+          }
+          exit 0
+
+      - name: Install Japanese tessdata
+        shell: pwsh
+        run: |
+          $tessdataDir = Join-Path $env:ProgramFiles 'Tesseract-OCR\tessdata'
+          New-Item -ItemType Directory -Force -Path $tessdataDir | Out-Null
+          Invoke-WebRequest `
+            -Uri 'https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/jpn.traineddata' `
+            -OutFile (Join-Path $tessdataDir 'jpn.traineddata')
+
+      - name: Test
+        run: make test
+
+      - name: Package
+        env:
+          TESSERACT_DIR: 'C:\Program Files\Tesseract-OCR'
+        run: make package
+
+      - name: Verify package contents
+        shell: pwsh
+        run: |
+          $requiredPaths = @(
+            'dist\nightreign-relics-counter.exe',
+            'dist\README.md',
+            'dist\relics.tsv',
+            'dist\data',
+            'dist\Tesseract-OCR\tesseract.exe',
+            'dist\Tesseract-OCR\tessdata\jpn.traineddata'
+          )
+
+          foreach ($path in $requiredPaths) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Required package path is missing: $path"
+            }
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightreign-relics-counter-windows-x64
+          path: dist/**
+          if-no-files-found: error
